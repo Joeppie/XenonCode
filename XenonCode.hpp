@@ -1358,6 +1358,9 @@ const int VERSION_PATCH = 0;
 		// declarations (name, CODE_TYPE, slot) recorded by the compiler.
 		struct GlobalVarDecl { std::string name; uint8_t type; uint32_t value; };
 		static inline std::vector<GlobalVarDecl> globalVarDecls {};
+		// PATCH XENON-DEBUG: executed-line tracking for the IDE debugger
+		static inline bool trackLines = false;
+		static inline std::vector<int> cycleLines {};
 	};
 
 	// Valid first words for the possible statements in a function scope
@@ -6451,6 +6454,20 @@ const int VERSION_PATCH = 0;
 		
 		bool IsLoaded() const {return assembly;}
 		
+		// PATCH XENON-DEBUG: line-tracking switch + drain (sorted, unique)
+		static void DebugTrack(bool on) {
+			Implementation::trackLines = on;
+			Implementation::cycleLines.clear();
+		}
+		static std::vector<int> DebugTakeLines() {
+			auto& v = Implementation::cycleLines;
+			std::sort(v.begin(), v.end());
+			v.erase(std::unique(v.begin(), v.end()), v.end());
+			std::vector<int> out;
+			out.swap(v);
+			return out;
+		}
+		
 		// PATCH XENON-VARS: JSON dump of the program's GLOBAL variables for
 		// the IDE — RAM rows read live (numbers as strings), STORAGE rows read
 		// the storage cache; KV text values ride verbatim (the UI breaks them
@@ -7484,6 +7501,11 @@ const int VERSION_PATCH = 0;
 						}break;
 						case LINENUMBER:{
 							currentLine = code.value;
+							// PATCH XENON-DEBUG: record the executed line
+							if (Implementation::trackLines
+							    && Implementation::cycleLines.size() < 200000) {
+								Implementation::cycleLines.push_back(currentLine);
+							}
 						}break;
 						case CODE_OP: {
 							ipcCheck();
