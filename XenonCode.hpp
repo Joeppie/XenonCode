@@ -6626,7 +6626,13 @@ const int VERSION_PATCH = 0;
 			for (const auto& [name, addr] : assembly->functionRefs) claim(name, addr);
 			for (const auto& t : assembly->timers) claim("system.timer", t.addr);
 			for (const auto& [port, f] : assembly->inputs) { (void)port; claim("system.input", f.addr); }
-			for (const auto& e : assembly->entryPoints) claim("entrypoint." + e.name, e.addr);
+			// PATCH XENON-ENTRYPOINT-FRAME: bodies are tagged "entrypoint." + the
+				// vector INDEX (the human name lives in EntryPoint.name); claiming
+				// by name never equals the recorded function, so a break inside
+				// an update/shutdown/click block resolved to NO frame ("top
+				// level", no locals) - claim by index.
+				for (size_t ei = 0; ei < assembly->entryPoints.size(); ++ei)
+					claim("entrypoint." + std::to_string(ei), assembly->entryPoints[ei].addr);
 			if (!found) return "[]";
 			// 3) the recorded declarations of that function, RAM rows read live
 			std::string out = "[";
@@ -6694,7 +6700,13 @@ const int VERSION_PATCH = 0;
 				for (const auto& [nm, addr] : assembly->functionRefs) claim(nm, addr);
 				for (const auto& t : assembly->timers) claim("system.timer", t.addr);
 				for (const auto& [port, f] : assembly->inputs) { (void)port; claim("system.input", f.addr); }
-				for (const auto& e : assembly->entryPoints) claim("entrypoint." + e.name, e.addr);
+				// PATCH XENON-ENTRYPOINT-FRAME: bodies are tagged "entrypoint." + the
+				// vector INDEX (the human name lives in EntryPoint.name); claiming
+				// by name never equals the recorded function, so a break inside
+				// an update/shutdown/click block resolved to NO frame ("top
+				// level", no locals) - claim by index.
+				for (size_t ei = 0; ei < assembly->entryPoints.size(); ++ei)
+					claim("entrypoint." + std::to_string(ei), assembly->entryPoints[ei].addr);
 				if (found) {
 					for (const auto& v : Implementation::localVarDecls)
 						if (v.func == func && v.name == name && !v.name.starts_with('@')
