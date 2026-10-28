@@ -2047,7 +2047,14 @@ const int VERSION_PATCH = 0;
 					auto includeSrc = GetParsedFile(filedir, includeFilename, parsedFiles);
 					src.lines.insert(src.lines.begin()+i, includeSrc.lines.begin(), includeSrc.lines.end());
 					i += includeSrc.lines.size();
-					src.lines.insert(src.lines.begin()+i, Word{Word::FileInfo, filedir + "/" + filename});
+					// PATCH XENON-SOURCEPATHS: return to THIS file's tag — the
+					// SourceFile ctor marks sections with the NORMALIZED
+					// filepath; the old filedir+"/"+filename string never
+					// equals it ("./main.xc" != "main.xc"), so every body
+					// compiled after an include ran under a THIRD, misnamed
+					// registration and per-file debugger breakpoints
+					// (SOURCEFILE/LINENUMBER pairs) never matched the file.
+					src.lines.insert(src.lines.begin()+i, Word{Word::FileInfo, src.filepath});
 					++i;
 				}
 			}
@@ -3155,6 +3162,19 @@ const int VERSION_PATCH = 0;
 				}
 				currentFunctionName = name;
 				currentFunctionAddr = addr();
+				// PATCH XENON-SOURCEPATHS: self-tag the BODY region. Bodies are
+				// entered by JMP (OP_JMP -> RunCode(addr)), which never executes
+				// the linearly-emitted SOURCEFILE record before them, so a body
+				// ran under whatever file the ip linearly passed LAST — an
+				// included file's functions and timers reported as the main
+				// file. Same deduped registration as the FileInfo case.
+				{
+					uint32_t sidx;
+					auto sit = std::find(sourceFiles.begin(), sourceFiles.end(), currentFile);
+					if (sit != sourceFiles.end()) sidx = uint32_t(std::distance(sourceFiles.begin(), sit));
+					else { sidx = uint32_t(sourceFiles.size()); sourceFiles.emplace_back(currentFile); }
+					rom_program.emplace_back(ByteCode{SOURCEFILE, sidx});
+				}
 				if (currentFunctionName == "system.timer") {
 					assert(currentTimerInterval);
 					timers.emplace_back(currentTimerInterval, currentFunctionAddr);
@@ -4347,9 +4367,20 @@ const int VERSION_PATCH = 0;
 						switch (firstWord.type) {
 							case Word::FileInfo:{
 								currentFile = firstWord.word;
-								write({SOURCEFILE, uint32_t(sourceFiles.size())});
-								rom_vars_init.emplace_back(ByteCode{SOURCEFILE, uint32_t(sourceFiles.size())});
-								sourceFiles.emplace_back(currentFile);
+								// PATCH XENON-SOURCEPATHS: dedup the name->index
+								// registration. The include-end marker re-tags the
+								// parent file; the old blind push gave the SAME name
+								// a NEW index each time, so streams carried several
+								// indices per file and per-file consumers (the
+								// debugger's breakpoints by NAME) matched none.
+								uint32_t sidx;
+								{
+									auto sit = std::find(sourceFiles.begin(), sourceFiles.end(), currentFile);
+									if (sit != sourceFiles.end()) sidx = uint32_t(std::distance(sourceFiles.begin(), sit));
+									else { sidx = uint32_t(sourceFiles.size()); sourceFiles.emplace_back(currentFile); }
+								}
+								write({SOURCEFILE, sidx});
+								rom_vars_init.emplace_back(ByteCode{SOURCEFILE, sidx});
 							}break;
 							case Word::Name: {
 								
