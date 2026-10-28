@@ -1354,6 +1354,10 @@ const int VERSION_PATCH = 0;
 		static std::unordered_map<std::string, double> globalNumericConstants;
 		static std::unordered_map<std::string, std::string> globalTextConstants;
 		static std::vector<std::string> entryPoints;
+		// PATCH XENON-VARS: exported table of global-scope variable
+		// declarations (name, CODE_TYPE, slot) recorded by the compiler.
+		struct GlobalVarDecl { std::string name; uint8_t type; uint32_t value; };
+		static inline std::vector<GlobalVarDecl> globalVarDecls {};
 	};
 
 	// Valid first words for the possible statements in a function scope
@@ -3008,6 +3012,10 @@ const int VERSION_PATCH = 0;
 				ByteCode byteCode{uint8_t(type), index};
 				if (name != "") {
 					userVars[currentFunctionName][currentStackId].emplace(name, byteCode);
+				}
+				// PATCH XENON-VARS: record global-scope declarations for the IDE
+				if (name != "" && currentFunctionName == "" && stack.empty()) {
+					Implementation::globalVarDecls.push_back({name, uint8_t(type), index});
 				}
 				return byteCode;
 			};
@@ -6443,6 +6451,53 @@ const int VERSION_PATCH = 0;
 		
 		bool IsLoaded() const {return assembly;}
 		
+		// PATCH XENON-VARS: JSON dump of the program's GLOBAL variables for
+		// the IDE — RAM rows read live (numbers as strings), STORAGE rows read
+		// the storage cache; KV text values ride verbatim (the UI breaks them
+		// open). Objects/arrays report an empty value (labels only).
+		std::string DumpVarsJson() {
+			auto esc = [](const std::string& in) {
+				std::string o;
+				for (char c : in) {
+					if (c == '"') o += "\\\"";
+					else if (c == '\\') o += "\\\\";
+					else if (c == '\n') o += "\\n";
+					else if ((unsigned char)c >= 32) o += c;
+				}
+				return o;
+			};
+			std::string out = "[";
+			for (const auto& v : Implementation::globalVarDecls) {
+				if (out.size() > 1) out += ",";
+				out += "{\"name\":\"" + esc(v.name) + "\",\"t\":" + std::to_string((int)v.type) + ",\"v\":";
+				switch (v.type) {
+					case RAM_VAR_NUMERIC: {
+						std::ostringstream s;
+						s << MemGetNumeric(ByteCode{v.type, v.value});
+						out += "\"" + esc(s.str()) + "\"";
+						break;
+					}
+					case RAM_VAR_TEXT:
+						out += "\"" + esc(MemGetText(ByteCode{v.type, v.value}, ARRAY_INDEX_NONE)) + "\"";
+						break;
+					case STORAGE_VAR_NUMERIC:
+					case STORAGE_VAR_TEXT:
+					case STORAGE_ARRAY_NUMERIC:
+					case STORAGE_ARRAY_TEXT: {
+						std::string nm = (assembly && v.value < assembly->storageRefs.size())
+						               ? assembly->storageRefs[v.value] : v.name;
+						auto it = storageCache.find(nm);
+						out += "\"" + esc(it != storageCache.end() && !it->second.empty() ? it->second[0] : "") + "\"";
+						break;
+					}
+					default:
+						out += "\"\"";
+				}
+				out += "}";
+			}
+			return out + "]";
+		}
+		
 		Computer() {}
 		virtual ~Computer() {
 			ClearAssemly();
@@ -6450,6 +6505,7 @@ const int VERSION_PATCH = 0;
 		
 		// Compile to bytecode and write to output stream
 		static bool CompileAssembly(std::ostream& stream, const std::vector<ParsedLine>& lines, bool verbose = false) {
+			Implementation::globalVarDecls.clear();   // PATCH XENON-VARS
 			Assembly assembly(lines, verbose);
 			assembly.Write(stream);
 			return true;
