@@ -1362,6 +1362,12 @@ const int VERSION_PATCH = 0;
 		// declarations (name, CODE_TYPE, slot) recorded by the compiler.
 		struct GlobalVarDecl { std::string name; uint8_t type; uint32_t value; };
 		static inline std::vector<GlobalVarDecl> globalVarDecls {};
+		// PATCH XENON-LOCALS: exported table of FUNCTION-LOCAL declarations
+		// (function, recursion copy, name, CODE_TYPE, slot) recorded by the
+		// compiler. Locals are ordinary RAM slots, so a debugger stopped at a
+		// line can read its function's frame LIVE (Computer::DumpLocalsAt).
+		struct LocalVarDecl { std::string func; int stackId; std::string name; uint8_t type; uint32_t value; };
+		static inline std::vector<LocalVarDecl> localVarDecls {};
 		// PATCH XENON-DEBUG: executed-line tracking for the IDE debugger
 		static inline bool trackLines = false;
 		static inline std::vector<int> cycleLines {};
@@ -3027,6 +3033,13 @@ const int VERSION_PATCH = 0;
 				// PATCH XENON-VARS: record global-scope declarations for the IDE
 				if (name != "" && currentFunctionName == "" && stack.empty()) {
 					Implementation::globalVarDecls.push_back({name, uint8_t(type), index});
+				}
+				// PATCH XENON-LOCALS: record function-local declarations
+				// (function bodies incl. system.init/tick/timer/input and the
+				// entrypoint.* screen functions all carry a name; the plain
+				// top level is the globals table, rule above)
+				if (name != "" && currentFunctionName != "") {
+					Implementation::localVarDecls.push_back({currentFunctionName, currentStackId, name, uint8_t(type), index});
 				}
 				return byteCode;
 			};
@@ -6533,6 +6546,109 @@ const int VERSION_PATCH = 0;
 			return out + "]";
 		}
 		
+		// PATCH XENON-LOCALS: JSON dump of the LOCAL variables of the function
+		// that executes (fileIdx, line) — the debugger's Locals panel at a
+		// pause reads the paused line's frame LIVE: locals are RAM slots (the
+		// compiler gives every declaration its own slot; recursion copies get
+		// their own, reported as "s" = stackId, 0 = the first). '@'-prefixed
+		// return slots are skipped (implementation artifacts); text rows ride
+		// verbatim (the UI breaks KV open), arrays/objects report an empty
+		// value (labels only). "[]" = the position is not inside a named body.
+		std::string DumpLocalsAt(int fileIdx, int line) {
+			auto esc = [](const std::string& in) {
+				std::string o;
+				for (char c : in) {
+					if (c == '"') o += "\\\"";
+					else if (c == '\\') o += "\\\\";
+					else if (c == '\n') o += "\\n";
+					else if ((unsigned char)c >= 32) o += c;
+				}
+				return o;
+			};
+			if (!assembly) return "[]";
+			// 1) the program position executing (fileIdx, line): walk the
+			//    SOURCEFILE/LINENUMBER stream in layout order (first match)
+			size_t pos = SIZE_MAX;
+			int curFile = 0;
+			for (size_t p = 0; p < assembly->rom_program.size(); ++p) {
+				const ByteCode& bc = assembly->rom_program[p];
+				if (bc.type == SOURCEFILE) { if (bc.value < assembly->sourceFiles.size()) curFile = int(bc.value); }
+				else if (bc.type == LINENUMBER && curFile == fileIdx && int(bc.value) == line) { pos = p; break; }
+			}
+			if (pos == SIZE_MAX) return "[]";
+			// 2) the body OWNING that position: a named body spans its start
+			//    address up to the CODE_RETURN that closes it (functions never
+			//    nest, so the first CODE_RETURN from the start ends it). Plain
+			//    top-level positions sit in the gaps between bodies -> no owner
+			//    (their variables are globals: the Vars panel's table).
+			std::string func;
+			bool found = false;
+			auto claim = [&](const std::string& name, uint32_t addr) {
+				if (found || addr > pos) return;
+				for (size_t p = addr; p < assembly->rom_program.size(); ++p) {
+					if (assembly->rom_program[p].type == CODE_RETURN) {
+						if (pos < p) { func = name; found = true; }
+						return;
+					}
+				}
+			};
+			for (const auto& [name, addr] : assembly->functionRefs) claim(name, addr);
+			for (const auto& t : assembly->timers) claim("system.timer", t.addr);
+			for (const auto& [port, f] : assembly->inputs) { (void)port; claim("system.input", f.addr); }
+			for (const auto& e : assembly->entryPoints) claim("entrypoint." + e.name, e.addr);
+			if (!found) return "[]";
+			// 3) the recorded declarations of that function, RAM rows read live
+			std::string out = "[";
+			for (const auto& v : Implementation::localVarDecls) {
+				if (v.func != func || v.name.starts_with('@')) continue;
+				if (out.size() > 1) out += ",";
+				out += "{\"name\":\"" + esc(v.name) + "\",\"t\":" + std::to_string((int)v.type) + ",\"s\":" + std::to_string(v.stackId) + ",\"v\":";
+				switch (v.type) {
+					case RAM_VAR_NUMERIC: {
+						std::ostringstream s;
+						s << MemGetNumeric(ByteCode{v.type, v.value});
+						out += "\"" + esc(s.str()) + "\"";
+						break;
+					}
+					case RAM_VAR_TEXT:
+						out += "\"" + esc(MemGetText(ByteCode{v.type, v.value}, ARRAY_INDEX_NONE)) + "\"";
+						break;
+					default:
+						out += "\"\"";
+				}
+				out += "}";
+			}
+			return out + "]";
+		}
+		
+		// PATCH XENON-LOCALS: the runtime source-file table as a JSON array
+		// (the SOURCEFILE vector in the compiler's EMIT order: a file is
+		// registered per stream — declarations and executed code can carry
+		// DIFFERENT indices for the same name). The IDE uses this as its
+		// file table so (file,line) pairs, breakpoints and the debug hook
+		// speak the SAME indices the VM does.
+		std::string SourceFilesJson() {
+			auto esc = [](const std::string& in) {
+				std::string o;
+				for (char c : in) {
+					if (c == '"') o += "\\\"";
+					else if (c == '\\') o += "\\\\";
+					else if (c == '\n') o += "\\n";
+					else if ((unsigned char)c >= 32) o += c;
+				}
+				return o;
+			};
+			if (!assembly) return "[]";
+			std::string out = "[";
+			bool first = true;
+			for (const auto& f : assembly->sourceFiles) {
+				if (!first) out += ",";
+				first = false;
+				out += "\"" + esc(f) + "\"";
+			}
+			return out + "]";
+		}
+		
 		Computer() {}
 		virtual ~Computer() {
 			ClearAssemly();
@@ -6541,6 +6657,7 @@ const int VERSION_PATCH = 0;
 		// Compile to bytecode and write to output stream
 		static bool CompileAssembly(std::ostream& stream, const std::vector<ParsedLine>& lines, bool verbose = false) {
 			Implementation::globalVarDecls.clear();   // PATCH XENON-VARS
+			Implementation::localVarDecls.clear();    // PATCH XENON-LOCALS
 			Assembly assembly(lines, verbose);
 			assembly.Write(stream);
 			return true;
