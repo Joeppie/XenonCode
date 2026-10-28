@@ -1350,6 +1350,10 @@ const int VERSION_PATCH = 0;
 		"recursive",
 	};
 	
+	// PATCH XENON-DEBUG v2: the debug stop-hook seam. The shim (xc_host.cpp)
+	// supplies a strong definition; builds without one link fine (the address
+	// of a weak function is null when it has no definition, and we guard).
+	extern "C" { void xc_debug_hook(int /*file*/, int /*line*/) __attribute__((weak)); }
 	struct Implementation {
 		static std::unordered_map<std::string, double> globalNumericConstants;
 		static std::unordered_map<std::string, std::string> globalTextConstants;
@@ -1361,6 +1365,10 @@ const int VERSION_PATCH = 0;
 		// PATCH XENON-DEBUG: executed-line tracking for the IDE debugger
 		static inline bool trackLines = false;
 		static inline std::vector<int> cycleLines {};
+		// PATCH XENON-DEBUG v2: current source-file index (SOURCEFILE opcode)
+		// + the EXECUTION-ORDER (file<<16 | line) pair stream
+		static inline uint32_t dbgFile = 0;
+		static inline std::vector<int> cyclePairs {};
 	};
 
 	// Valid first words for the possible statements in a function scope
@@ -6458,6 +6466,8 @@ const int VERSION_PATCH = 0;
 		static void DebugTrack(bool on) {
 			Implementation::trackLines = on;
 			Implementation::cycleLines.clear();
+			Implementation::cyclePairs.clear();      // PATCH XENON-DEBUG v2
+			Implementation::dbgFile = 0;             // PATCH XENON-DEBUG v2
 		}
 		static std::vector<int> DebugTakeLines() {
 			auto& v = Implementation::cycleLines;
@@ -6465,6 +6475,14 @@ const int VERSION_PATCH = 0;
 			v.erase(std::unique(v.begin(), v.end()), v.end());
 			std::vector<int> out;
 			out.swap(v);
+			return out;
+		}
+		// PATCH XENON-DEBUG v2: drain the EXECUTION-ORDER pair stream
+		// (file * 1000000 + line). No sort, no unique: the debugger steps
+		// the program by walking this stream.
+		static std::vector<int> DebugTakePairs() {
+			std::vector<int> out;
+			out.swap(Implementation::cyclePairs);
 			return out;
 		}
 		
@@ -7477,6 +7495,10 @@ const int VERSION_PATCH = 0;
 						case SOURCEFILE:{
 							if (code.value < assembly->sourceFiles.size()) {
 								currentFile = assembly->sourceFiles[code.value];
+								// PATCH XENON-DEBUG v2: the file for the pairs
+								if (Implementation::trackLines) {
+									Implementation::dbgFile = code.value;
+								}
 							}
 						}break;
 						case LINENUMBER:{
@@ -7485,6 +7507,16 @@ const int VERSION_PATCH = 0;
 							if (Implementation::trackLines
 							    && Implementation::cycleLines.size() < 200000) {
 								Implementation::cycleLines.push_back(currentLine);
+								// PATCH XENON-DEBUG v2: ordered (file,line)
+								// pair + the stop-hook seam. The hook runs on
+								// the interpreter stack: a blocking host (the
+								// worker debugger) SLEEPS HERE mid-cycle and
+								// resumes with the continuation intact.
+								Implementation::cyclePairs.push_back(
+								    int(Implementation::dbgFile) * 1000000 + int(currentLine));
+								if (&xc_debug_hook != nullptr) {
+									xc_debug_hook(int(Implementation::dbgFile), int(currentLine));
+								}
 							}
 						}break;
 						case CODE_OP: {
