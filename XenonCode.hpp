@@ -1353,7 +1353,9 @@ const int VERSION_PATCH = 0;
 	// PATCH XENON-DEBUG v2: the debug stop-hook seam. The shim (xc_host.cpp)
 	// supplies a strong definition; builds without one link fine (the address
 	// of a weak function is null when it has no definition, and we guard).
-	extern "C" { void xc_debug_hook(int /*file*/, int /*line*/) __attribute__((weak)); }
+	// PATCH XENON-DEBUG v3: the seam carries the call depth (step-over over
+	// in-file callees — the pair stream alone cannot express it).
+	extern "C" { void xc_debug_hook(int /*file*/, int /*line*/, int /*depth*/) __attribute__((weak)); }
 	struct Implementation {
 		static std::unordered_map<std::string, double> globalNumericConstants;
 		static std::unordered_map<std::string, std::string> globalTextConstants;
@@ -1375,6 +1377,20 @@ const int VERSION_PATCH = 0;
 		// + the EXECUTION-ORDER (file<<16 | line) pair stream
 		static inline uint32_t dbgFile = 0;
 		static inline std::vector<int> cyclePairs {};
+		// PATCH XENON-DEBUG v3: parallel CALL-DEPTH stream (Computer
+		// recursion_depth at the executed line) — the debugger's step-over
+		// law stops at depth <= the paused depth
+		static inline std::vector<int> cycleDepth {};
+		// v3: gate on the hook CALL (main-thread hosts: the pair stream IS
+		// the debugger; the EM_JS per-line crossing is pure cost there)
+		static inline bool hookLive = false;
+		// v3: exact-line PAUSE REQUEST for hosts that cannot sleep the
+		// interpreter — the next executed LINENUMBER records the site and
+		// throws DebugPause (the host sees xc_cycle() return 2)
+		struct DebugPause {};
+		static inline volatile bool pauseRequest = false;
+		static inline int pauseFile = 0;
+		static inline int pauseLine = 0;
 	};
 
 	// Valid first words for the possible statements in a function scope
@@ -6512,7 +6528,25 @@ const int VERSION_PATCH = 0;
 			Implementation::cycleLines.clear();
 			Implementation::cyclePairs.clear();      // PATCH XENON-DEBUG v2
 			Implementation::dbgFile = 0;             // PATCH XENON-DEBUG v2
+			Implementation::cycleDepth.clear();      // PATCH XENON-DEBUG v3
 		}
+		// PATCH XENON-DEBUG v3: drain the call-depth stream (index-aligned
+		// with DebugTakePairs — the host drains both per cycle)
+		static std::vector<int> DebugTakeDepths() {
+			std::vector<int> out;
+			out.swap(Implementation::cycleDepth);
+			return out;
+		}
+		// v3: the exact-line pause seam (the host's cycle call catches
+		// Implementation::DebugPause, reads the site, keeps the Computer)
+		static void DebugPauseRequest() { Implementation::pauseRequest = true; }
+		// v3: cancel an armed park (▶/F8/re-boot: START outranks a ⏸ that
+		// has not reached its stop line — a late park would yank the UI)
+		static void DebugPauseCancel() { Implementation::pauseRequest = false; }
+		static int  DebugPauseFile() { return Implementation::pauseFile; }
+		static int  DebugPauseLine() { return Implementation::pauseLine; }
+		// v3: arm/disarm the per-line stop-hook CALL
+		static void HookLive(bool on) { Implementation::hookLive = on; }
 		static std::vector<int> DebugTakeLines() {
 			auto& v = Implementation::cycleLines;
 			std::sort(v.begin(), v.end());
@@ -7731,28 +7765,51 @@ const int VERSION_PATCH = 0;
 						case SOURCEFILE:{
 							if (code.value < assembly->sourceFiles.size()) {
 								currentFile = assembly->sourceFiles[code.value];
-								// PATCH XENON-DEBUG v2: the file for the pairs
-								if (Implementation::trackLines) {
-									Implementation::dbgFile = code.value;
-								}
+								// PATCH XENON-DEBUG v2: the file for the pairs —
+								// v3: UNCONDITIONAL (one store per SOURCEFILE
+								// opcode): the hook evaluates runTo/breakpoint FILE
+								// checks while trackLines is off; a frozen dbgFile
+								// would report every untracked line as file 0
+								Implementation::dbgFile = code.value;
 							}
 						}break;
 						case LINENUMBER:{
 							currentLine = code.value;
+							// PATCH XENON-DEBUG v3: pause-request seam —
+							// OUTSIDE the tracking gate (a predictable-false
+							// branch is free; pausing must work untracked)
+							if (__builtin_expect(Implementation::pauseRequest, 0)) {
+								Implementation::pauseRequest = false;
+								Implementation::pauseFile = int(Implementation::dbgFile);
+								Implementation::pauseLine = currentLine;
+								throw Implementation::DebugPause{};
+							}
 							// PATCH XENON-DEBUG: record the executed line
-							if (Implementation::trackLines
-							    && Implementation::cycleLines.size() < 200000) {
-								Implementation::cycleLines.push_back(currentLine);
-								// PATCH XENON-DEBUG v2: ordered (file,line)
-								// pair + the stop-hook seam. The hook runs on
-								// the interpreter stack: a blocking host (the
-								// worker debugger) SLEEPS HERE mid-cycle and
-								// resumes with the continuation intact.
-								Implementation::cyclePairs.push_back(
-								    int(Implementation::dbgFile) * 1000000 + int(currentLine));
-								if (&xc_debug_hook != nullptr) {
-									xc_debug_hook(int(Implementation::dbgFile), int(currentLine));
+							if (Implementation::trackLines) {
+								// v3: PER-STREAM caps (sharing the lines cap
+								// killed pairs when lines were never drained)
+								if (Implementation::cycleLines.size() < 200000)
+									Implementation::cycleLines.push_back(currentLine);
+								if (Implementation::cyclePairs.size() < 200000) {
+									// PATCH XENON-DEBUG v2: ordered (file,line) pair —
+									// the main-thread pump's stream
+									Implementation::cyclePairs.push_back(
+									    int(Implementation::dbgFile) * 1000000 + int(currentLine));
+									// PATCH XENON-DEBUG v3: parallel depth row
+									Implementation::cycleDepth.push_back(int(recursion_depth));
 								}
+							}
+							// v3: the stop-hook CALL — gated by hookLive ONLY (worker
+							// hosts arm it, main-thread hosts stay inert), NOT by
+							// trackLines: the hook IS the worker's debugger and must
+							// service pending commands (breakpoints, steps, runTo,
+							// parks) even while the pump records nothing. The hook runs
+							// on the interpreter stack: a blocking host (the worker
+							// debugger) SLEEPS HERE mid-cycle and resumes with the
+							// continuation intact.
+							if (Implementation::hookLive && &xc_debug_hook != nullptr) {
+								xc_debug_hook(int(Implementation::dbgFile), int(currentLine),
+								              int(recursion_depth));
 							}
 						}break;
 						case CODE_OP: {
