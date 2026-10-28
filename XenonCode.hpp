@@ -6912,11 +6912,10 @@ const int VERSION_PATCH = 0;
 		void StorageSet(double value, ByteCode arr, uint32_t arrIndex = ARRAY_INDEX_NONE) {
 			auto& storage = GetStorage(arr);
 			if (arrIndex == ARRAY_INDEX_NONE) {
+				if (storage.empty()) storage.emplace_back("0");   // PATCH XENON-LENIENT-INDEX
 				storage[0] = ToStringHighPrecision(value);
 			} else{
-				if (arrIndex >= storage.size()) {
-					throw RuntimeError("Invalid array indexing");
-				}
+				if (arrIndex >= storage.size()) storage.resize(arrIndex + 1, "0");   // PATCH XENON-LENIENT-INDEX
 				storage[arrIndex] = ToStringHighPrecision(value);
 			}
 			storageDirty = true;
@@ -6924,11 +6923,10 @@ const int VERSION_PATCH = 0;
 		void StorageSet(const std::string& value, ByteCode arr, uint32_t arrIndex = ARRAY_INDEX_NONE) {
 			auto& storage = GetStorage(arr);
 			if (arrIndex == ARRAY_INDEX_NONE) {
+				if (storage.empty()) storage.emplace_back("");   // PATCH XENON-LENIENT-INDEX
 				storage[0] = value;
 			} else{
-				if (arrIndex >= storage.size()) {
-					throw RuntimeError("Invalid array indexing");
-				}
+				if (arrIndex >= storage.size()) storage.resize(arrIndex + 1, "0");   // PATCH XENON-LENIENT-INDEX
 				storage[arrIndex] = value;
 			}
 			storageDirty = true;
@@ -6937,28 +6935,23 @@ const int VERSION_PATCH = 0;
 		double StorageGetNumeric(ByteCode arr, uint32_t arrIndex = ARRAY_INDEX_NONE) {
 			auto& storage = GetStorage(arr);
 			if (arrIndex == ARRAY_INDEX_NONE) {
-				if (storage.empty()) {
-					throw RuntimeError("Invalid array indexing");
-				}
+				if (storage.empty()) return 0.0;   // PATCH XENON-LENIENT-INDEX
 				return ToDouble(storage[0]);
 			} else{
-				if (arrIndex >= storage.size()) {
-					throw RuntimeError("Invalid array indexing");
-				}
+				if (arrIndex >= storage.size()) return 0.0;   // PATCH XENON-LENIENT-INDEX
 				return ToDouble(storage[arrIndex]);
 			}
 		}
 		const std::string& StorageGetText(ByteCode arr, uint32_t arrIndex = ARRAY_INDEX_NONE) {
 			auto& storage = GetStorage(arr);
+			// PATCH XENON-LENIENT-INDEX: empty/OOB text reads return "" (the Badger's
+			// `$access_buffers.$side` on an unwritten text var is LEGAL in game)
+			static const std::string xc_no_text;
 			if (arrIndex == ARRAY_INDEX_NONE) {
-				if (storage.empty()) {
-					throw RuntimeError("Invalid array indexing");
-				}
+				if (storage.empty()) return xc_no_text;
 				return storage[0];
 			} else{
-				if (arrIndex >= storage.size()) {
-					throw RuntimeError("Invalid array indexing");
-				}
+				if (arrIndex >= storage.size()) return xc_no_text;
 				return storage[arrIndex];
 			}
 		}
@@ -6979,7 +6972,8 @@ const int VERSION_PATCH = 0;
 				}break;
 				case RAM_ARRAY_NUMERIC: {
 					auto& arr = GetNumericArray(dst);
-					if (__builtin_expect(arrIndex == ARRAY_INDEX_NONE || arrIndex >= arr.size(), 0)) throw RuntimeError("Invalid array indexing");
+					if (arrIndex == ARRAY_INDEX_NONE) break;
+					if (arrIndex >= arr.size()) arr.resize(arrIndex + 1, 0.0);   // PATCH XENON-LENIENT-INDEX
 					arr[arrIndex] = value;
 				}break;
 				case STORAGE_ARRAY_TEXT:
@@ -7000,12 +6994,11 @@ const int VERSION_PATCH = 0;
 				case STORAGE_VAR_TEXT: {
 					auto& storage = GetStorage(dst);
 					if (arrIndex == ARRAY_INDEX_NONE) {
-						storage[0] = value;
+					if (storage.empty()) storage.emplace_back("");   // PATCH XENON-LENIENT-INDEX (storage[0] on empty was UB)
+					storage[0] = value;
 						storageDirty = true;
 					} else if (utf8length(value) == 1) {
-						if (arrIndex >= utf8length(storage[0])) {
-							throw RuntimeError("Invalid text indexing");
-						}
+						if (arrIndex >= utf8length(storage[0])) { return; }   // PATCH XENON-LENIENT-INDEX: OOB text write skipped
 						utf8assign(storage[0], arrIndex, value);
 						storageDirty = true;
 					} else {
@@ -7022,9 +7015,7 @@ const int VERSION_PATCH = 0;
 					if (arrIndex == ARRAY_INDEX_NONE) {
 						ram_text[dst.value] = value;
 					} else if (utf8length(value) == 1) {
-						if (arrIndex >= utf8length(ram_text[dst.value])) {
-							throw RuntimeError("Invalid text indexing");
-						}
+						if (arrIndex >= utf8length(ram_text[dst.value])) { return; }   // PATCH XENON-LENIENT-INDEX: OOB text write skipped
 						utf8assign(ram_text[dst.value], arrIndex, value);
 					} else {
 						throw RuntimeError("Invalid char assignment");
@@ -7032,9 +7023,8 @@ const int VERSION_PATCH = 0;
 				}break;
 				case RAM_ARRAY_TEXT: {
 					auto& arr = GetTextArray(dst);
-					if (arrIndex == ARRAY_INDEX_NONE || arrIndex >= arr.size()) {
-						throw RuntimeError("Invalid array indexing");
-					}
+					if (arrIndex == ARRAY_INDEX_NONE) break;
+					if (arrIndex >= arr.size()) arr.resize(arrIndex + 1, std::string());   // PATCH XENON-LENIENT-INDEX
 					arr[arrIndex] = value;
 				}break;
 				case STORAGE_ARRAY_NUMERIC:
@@ -7075,9 +7065,7 @@ const int VERSION_PATCH = 0;
 				}break;
 				case RAM_ARRAY_NUMERIC: {
 					auto& arr = GetNumericArray(ref);
-					if (__builtin_expect(arrIndex == ARRAY_INDEX_NONE || arrIndex >= arr.size(), 0)) {
-						throw RuntimeError("Invalid array indexing");
-					}
+					if (arrIndex == ARRAY_INDEX_NONE || arrIndex >= arr.size()) return 0.0;   // PATCH XENON-LENIENT-INDEX
 					return arr[arrIndex];
 				}break;
 				case CODE_VOID: return 0.0;
@@ -7134,9 +7122,7 @@ const int VERSION_PATCH = 0;
 						return assembly->rom_textConstants[ref.value];
 					} else {
 						const std::string& text = assembly->rom_textConstants[ref.value];
-						if (arrIndex >= utf8length(text)) {
-							throw RuntimeError("Invalid text indexing");
-						}
+						if (arrIndex >= utf8length(text)) { return std::string(); }   // PATCH XENON-LENIENT-INDEX
 						return utf8substr(text, arrIndex, 1);
 					}
 				}break;
@@ -7148,9 +7134,7 @@ const int VERSION_PATCH = 0;
 						return StorageGetText(ref);
 					} else {
 						const std::string& text = StorageGetText(ref);
-						if (arrIndex >= utf8length(text)) {
-							throw RuntimeError("Invalid text indexing");
-						}
+						if (arrIndex >= utf8length(text)) { return std::string(); }   // PATCH XENON-LENIENT-INDEX
 						return utf8substr(text, arrIndex, 1);
 					}
 				}break;
@@ -7161,17 +7145,13 @@ const int VERSION_PATCH = 0;
 					if (arrIndex == ARRAY_INDEX_NONE) {
 						return ram_text[ref.value];
 					} else {
-						if (arrIndex >= utf8length(ram_text[ref.value])) {
-							throw RuntimeError("Invalid text indexing");
-						}
+						if (arrIndex >= utf8length(ram_text[ref.value])) { return std::string(); }   // PATCH XENON-LENIENT-INDEX
 						return utf8substr(ram_text[ref.value], arrIndex, 1);
 					}
 				}break;
 				case RAM_ARRAY_TEXT: {
 					auto& arr = GetTextArray(ref);
-					if (arrIndex == ARRAY_INDEX_NONE || arrIndex >= arr.size()) {
-						throw RuntimeError("Invalid array indexing");
-					}
+					if (arrIndex == ARRAY_INDEX_NONE || arrIndex >= arr.size()) return std::string();   // PATCH XENON-LENIENT-INDEX
 					return arr[arrIndex];
 				}break;
 				case CODE_VOID: {
