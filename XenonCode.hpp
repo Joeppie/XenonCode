@@ -6652,6 +6652,82 @@ const int VERSION_PATCH = 0;
 			return out + "]";
 		}
 		
+		// PATCH XENON-WRITEBACK: type-validated writeback of ONE variable
+		// visible at (fileIdx, line): the frame of the owning body first
+		// (the XENON-LOCALS table), then the globals (the XENON-VARS
+		// table). RAM slots are written DIRECTLY - called at a debug stop
+		// this injects the value into the paused program. Validation:
+		// numbers accept a fully-parsed finite decimal (and 'true'/'false'
+		// = 1/0, the language's own truth words); text accepts every
+		// string; storage/array/object REFUSE (world-save persistence /
+		// label-only views). Answers {"ok":true} | {"error":"..."}.
+		std::string WriteVarAt(int fileIdx, int line, const std::string& name, int type, const std::string& value) {
+			if (!assembly) return "{\"error\":\"no program\"}";
+			if (type != RAM_VAR_NUMERIC && type != RAM_VAR_TEXT)
+				return "{\"error\":\"only number and text variables are editable\"}";
+			// 1) the body owning (fileIdx, line) — the same walk DumpLocalsAt does
+			size_t pos = SIZE_MAX;
+			int curFile = 0;
+			for (size_t p = 0; p < assembly->rom_program.size(); ++p) {
+				const ByteCode& bc = assembly->rom_program[p];
+				if (bc.type == SOURCEFILE) { if (bc.value < assembly->sourceFiles.size()) curFile = int(bc.value); }
+				else if (bc.type == LINENUMBER && curFile == fileIdx && int(bc.value) == line) { pos = p; break; }
+			}
+			// 2) the declaration: the owning frame's locals first (a local
+			// shadows a global, the language's lookup), then the globals.
+			// The frame is only known for a position INSIDE a body; a
+			// top-level position keeps only the globals lookup.
+			const Implementation::LocalVarDecl* lv = nullptr;
+			if (pos != SIZE_MAX) {
+				std::string func;
+				uint32_t best = 0;
+				bool found = false;
+				auto claim = [&](const std::string& nm, uint32_t addr) {
+					if (found || addr > pos) return;
+					for (size_t p = addr; p < assembly->rom_program.size(); ++p) {
+						if (assembly->rom_program[p].type == CODE_RETURN) {
+							if (pos < p) { func = nm; best = addr; found = true; }
+							return;
+						}
+					}
+				};
+				for (const auto& [nm, addr] : assembly->functionRefs) claim(nm, addr);
+				for (const auto& t : assembly->timers) claim("system.timer", t.addr);
+				for (const auto& [port, f] : assembly->inputs) { (void)port; claim("system.input", f.addr); }
+				for (const auto& e : assembly->entryPoints) claim("entrypoint." + e.name, e.addr);
+				if (found) {
+					for (const auto& v : Implementation::localVarDecls)
+						if (v.func == func && v.name == name && !v.name.starts_with('@')
+						    && (!lv || v.stackId < lv->stackId)) lv = &v;
+				}
+			}
+			const Implementation::GlobalVarDecl* gv = nullptr;
+			if (!lv) for (const auto& v : Implementation::globalVarDecls)
+				if (v.name == name) { gv = &v; break; }
+			if (!lv && !gv) return "{\"error\":\"no such variable in this frame\"}";
+			uint8_t vt = lv ? lv->type : gv->type;
+			uint32_t slot = lv ? lv->value : gv->value;
+			if (int(vt) != type) return "{\"error\":\"the variable changed type since this frame was read\"}";
+			if (vt == RAM_VAR_NUMERIC) {
+				if (slot >= assembly->ram_numericVariables || slot >= ram_numeric.size())
+					return "{\"error\":\"slot out of range\"}";
+				const char* cs = value.c_str();
+				if (value == "true" || value == "false") { ram_numeric[slot] = (value == "true") ? 1 : 0; return "{\"ok\":true}"; }
+				char* endp = nullptr;
+				double d = std::strtod(cs, &endp);
+				while (endp && *endp == ' ') endp++;
+				if (endp == cs || (endp && *endp != '\0') || !std::isfinite(d))
+					return "{\"error\":\"not a finite number\"}";
+				ram_numeric[slot] = d;
+				return "{\"ok\":true}";
+			}
+			// RAM_VAR_TEXT
+			if (slot >= assembly->ram_textVariables || slot >= ram_text.size())
+				return "{\"error\":\"slot out of range\"}";
+			ram_text[slot] = value;
+			return "{\"ok\":true}";
+		}
+
 		// PATCH XENON-LOCALS: the runtime source-file table as a JSON array
 		// (the SOURCEFILE vector in the compiler's EMIT order: a file is
 		// registered per stream — declarations and executed code can carry
