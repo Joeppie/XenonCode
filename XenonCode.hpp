@@ -2235,12 +2235,12 @@ const int VERSION_PATCH = 0;
 		}
 		operator int64_t() const {
 			if (type == Numeric) return (int64_t)std::round(numericValue);
-			else if (type == Text) return stoll(textValue);
+			else if (type == Text) return textValue.empty() ? 0 : strtoll(textValue.c_str(), nullptr, 10);
 			return 0;
 		}
 		operator uint64_t() const {
 			if (type == Numeric) return (uint64_t)std::round(numericValue);
-			else if (type == Text) return stoull(textValue);
+			else if (type == Text) return textValue.empty() ? 0 : strtoull(textValue.c_str(), nullptr, 10);
 			else if (type >= Object) return addrValue;
 			return 0;
 		}
@@ -2251,7 +2251,7 @@ const int VERSION_PATCH = 0;
 		}
 		operator uint32_t() const {
 			if (type == Numeric) return (uint32_t)std::round(numericValue);
-			else if (type == Text) return stoul(textValue);
+			else if (type == Text) return textValue.empty() ? 0 : (unsigned long)strtoull(textValue.c_str(), nullptr, 10);
 			return 0;
 		}
 		operator int16_t() const {
@@ -2261,7 +2261,7 @@ const int VERSION_PATCH = 0;
 		}
 		operator uint16_t() const {
 			if (type == Numeric) return (uint16_t)std::round(numericValue);
-			else if (type == Text) return stoul(textValue);
+			else if (type == Text) return textValue.empty() ? 0 : (unsigned long)strtoull(textValue.c_str(), nullptr, 10);
 			return 0;
 		}
 		operator int8_t() const {
@@ -2271,7 +2271,7 @@ const int VERSION_PATCH = 0;
 		}
 		operator uint8_t() const {
 			if (type == Numeric) return (uint8_t)std::round(numericValue);
-			else if (type == Text) return stoul(textValue);
+			else if (type == Text) return textValue.empty() ? 0 : (unsigned long)strtoull(textValue.c_str(), nullptr, 10);
 			return 0;
 		}
 		operator std::string() const {
