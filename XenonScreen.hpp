@@ -398,6 +398,10 @@ class XenonScreen {
 	std::vector<uint32_t> _pixels;
 	std::vector<uint32_t> _stagingBuffer;
 	bool _dirty = false;
+	// XENON-SCREEN-VERSION (Archean, v1.16.8 perf): every pixel write counts.
+	// The app's pump blits a surface only when its version moved (the game
+	// redraws on intent; most surfaces are static between events).
+	uint64_t _writeSeq = 0;
 	uint32_t _click_x = 0;
 	uint32_t _click_y = 0;
 	bool _clicked = false;
@@ -504,7 +508,9 @@ public:
 	
 	void Dirty() {
 		_dirty = true;
+		++_writeSeq;
 	}
+	uint64_t WriteSeq() const { return _writeSeq; }
 	
 	XenonScreen(uint32_t width, uint32_t height, const std::vector<uint32_t>& pixels, uint32_t bgColor = XENONCODE_COLOR(0,0,0,255), uint32_t fgColor = XENONCODE_DEFAULT_COLOR)
 		: _width(width)
@@ -553,7 +559,7 @@ public:
 
 inline void XenonScreen::Blank(uint32_t color) {
 	std::fill(_pixels.begin(), _pixels.end(), color);
-	_dirty = true;
+	Dirty();
 }
 
 inline void XenonScreen::WriteLine(int x, int y, uint32_t color, const std::string_view& text) {
@@ -600,7 +606,7 @@ inline void XenonScreen::WriteLine(int x, int y, uint32_t color, const std::stri
 		}
 		x += _textSizeX*_textSizeMultiplier;
 	}
-	_dirty = true;
+	Dirty();
 }
 
 inline void XenonScreen::Write(int x, int y, uint32_t color, const std::string_view& text) {
@@ -680,7 +686,7 @@ inline void XenonScreen::Draw(int x, int y, uint32_t color, int rectWidth, int r
 			}
 		}
 	}
-	_dirty = true;
+	Dirty();
 }
 
 inline uint32_t XenonScreen::GetPixel(int x, int y) const {
@@ -708,7 +714,7 @@ inline void XenonScreen::DrawPoint(int x, int y, uint32_t color) {
 				uint8_t(std::clamp(int32_t(XENONCODE_COLOR_A(prev)) + a, 0, 255))
 			);
 		}
-		_dirty = true;
+		Dirty();
 	}
 }
 
