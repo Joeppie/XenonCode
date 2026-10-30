@@ -376,8 +376,11 @@ class XenonScreen {
 	const unsigned int _textSizeY = 8;
 	
 	// configuration
-	const uint32_t _width;
-	const uint32_t _height;
+	// XENON-PANEL-RESIZE (Archean): $panel.set_size(w,h) resizes in place —
+	// the members lose const so the panel keeps its OBJECT IDENTITY (the
+	// program's $panel stays valid; the host's per-cycle metas carry w/h).
+	uint32_t _width;
+	uint32_t _height;
 	uint32_t _bgColor;
 	uint32_t _fgColor;
 	
@@ -524,6 +527,14 @@ public:
 	// Public functions
 	
 	void Blank() {Blank(_bgColor);}
+	void Resize(uint32_t width, uint32_t height) {
+		if (width == _width && height == _height) return;
+		_width = width;
+		_height = height;
+		_pixels.assign(size_t(width) * height, _bgColor);
+		_stagingBuffer.assign(size_t(width) * height, _bgColor);
+		Dirty();
+	}
 	void Blank(uint32_t color);
 	void Write(uint32_t color, const std::string_view& text) {Write(0,0, color, text);}
 	void Write(const std::string_view& text) {Write(_fgColor, text);}
